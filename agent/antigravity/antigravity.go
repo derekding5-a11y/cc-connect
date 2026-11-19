@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +39,10 @@ type Agent struct {
 	providers    []core.ProviderConfig
 	activeIdx    int
 	sessionEnv   []string
+	launch       *launchState
+	run          cliRunner
+	usageReport  *core.UsageReport
+	usageAt      time.Time
 	mu           sync.RWMutex
 }
 
@@ -49,6 +52,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir = "."
 	}
 	model, _ := opts["model"].(string)
+	effort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
 	cmd, extraArgs := core.ParseCmdOpts(opts, "agy")
@@ -75,15 +79,21 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("antigravity: %q CLI not found in PATH, install from: https://antigravity.google/docs/cli-overview", cmd)
 	}
 
+	caps := probeAgyCLI(context.Background(), execCLI, cmd)
 	return &Agent{
 		workDir:      workDir,
-		model:        model,
+		model:        strings.TrimSpace(model),
 		mode:         mode,
 		cmd:          cmd,
 		cliExtraArgs: extraArgs,
 		configEnv:    core.ParseConfigEnv(opts),
 		timeout:      timeout,
 		activeIdx:    -1,
+		launch: &launchState{
+			model:  strings.TrimSpace(model),
+			effort: normalizeAgyEffort(effort),
+			caps:   caps,
+		},
 	}, nil
 }
 
@@ -116,7 +126,12 @@ func (a *Agent) GetWorkDir() string {
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	model = strings.TrimSpace(model)
 	a.model = model
+	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) && a.providers[a.activeIdx].Model != "" {
+		a.providers[a.activeIdx].Model = model
+	}
+	a.syncLaunchLocked()
 	slog.Info("antigravity: model changed", "model", model)
 }
 
@@ -134,66 +149,135 @@ func (a *Agent) configuredModels() []core.ModelOption {
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
+		a.rememberCatalog(models)
 		return models
 	}
-	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
-		return models
+	models, err := a.loadModelCatalog(ctx)
+	if err != nil {
+		slog.Warn("antigravity: model catalog unavailable", "error", err)
+		return nil
 	}
-	return []core.ModelOption{
-		{Name: "gemini-3.1-pro-preview", Desc: "Gemini 3.1 Pro Preview"},
-		{Name: "gemini-3-flash-preview", Desc: "Gemini 3 Flash Preview"},
-		{Name: "gemini-2.5-pro", Desc: "Gemini 2.5 Pro"},
-		{Name: "gemini-2.5-flash", Desc: "Gemini 2.5 Flash"},
+	return models
+}
+
+func (a *Agent) SetReasoningEffort(effort string) {
+	effort = normalizeAgyEffort(effort)
+	if effort == "" {
+		return
+	}
+	available := a.AvailableReasoningEfforts()
+	if !containsString(available, effort) {
+		slog.Warn("antigravity: reasoning effort rejected", "effort", effort)
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	base, _, _ := splitEffortSuffix(a.effectiveModelLocked())
+	launch := a.ensureLaunchLocked()
+	launch.mu.Lock()
+	sibling := variantID(base, effort, launch.catalog)
+	if sibling != "" && sibling != a.effectiveModelLocked() {
+		a.model = sibling
+		if a.activeIdx >= 0 && a.activeIdx < len(a.providers) && a.providers[a.activeIdx].Model != "" {
+			a.providers[a.activeIdx].Model = sibling
+		}
+		launch.persistModel = true
+	}
+	launch.effort = effort
+	launch.model = a.effectiveModelLocked()
+	launch.mu.Unlock()
+	slog.Info("antigravity: reasoning effort changed", "effort", effort, "model", a.effectiveModelLocked())
+}
+
+func (a *Agent) GetReasoningEffort() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	launch := a.launch
+	model := a.effectiveModelLocked()
+	if launch == nil {
+		_, effort, ok := splitEffortSuffix(model)
+		if ok {
+			return effort
+		}
+		return ""
+	}
+	launch.mu.RLock()
+	defer launch.mu.RUnlock()
+	if launch.effort != "" {
+		return launch.effort
+	}
+	_, effort, ok := splitEffortSuffix(model)
+	if ok {
+		return effort
+	}
+	return ""
+}
+
+func (a *Agent) AvailableReasoningEfforts() []string {
+	model, _, _, catalog := a.launchSnapshot()
+	if len(catalog) == 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		loaded, err := a.loadModelCatalog(ctx)
+		if err != nil {
+			slog.Debug("antigravity: reasoning levels unavailable", "error", err)
+			return nil
+		}
+		catalog = loaded
+		model, _, _, _ = a.launchSnapshot()
+	}
+	if strings.TrimSpace(model) == "" {
+		a.mu.RLock()
+		model = a.effectiveModelLocked()
+		a.mu.RUnlock()
+	}
+	return effortsForModel(model, catalog)
+}
+
+func (a *Agent) ReasoningModel() (string, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.launch == nil {
+		return "", false
+	}
+	a.launch.mu.Lock()
+	defer a.launch.mu.Unlock()
+	if !a.launch.persistModel {
+		return "", false
+	}
+	a.launch.persistModel = false
+	return a.effectiveModelLocked(), true
+}
+
+func (a *Agent) ensureLaunchLocked() *launchState {
+	if a.launch == nil {
+		a.launch = &launchState{model: a.model}
+	}
+	return a.launch
+}
+
+func (a *Agent) effectiveModelLocked() string {
+	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
+}
+
+func (a *Agent) syncLaunchLocked() {
+	launch := a.ensureLaunchLocked()
+	launch.mu.Lock()
+	defer launch.mu.Unlock()
+	model := a.effectiveModelLocked()
+	launch.model = model
+	if _, effort, ok := splitEffortSuffix(model); ok {
+		launch.effort = effort
 	}
 }
 
-func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("GOOGLE_API_KEY")
-	}
-	if apiKey == "" {
-		return nil
-	}
-
-	url := "https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		slog.Debug("antigravity: failed to fetch models", "error", err)
-		return nil
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-
-	var result struct {
-		Models []struct {
-			Name        string `json:"name"`
-			DisplayName string `json:"displayName"`
-		} `json:"models"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil
-	}
-
-	var models []core.ModelOption
-	for _, m := range result.Models {
-		id := strings.TrimPrefix(m.Name, "models/")
-		if !strings.HasPrefix(id, "gemini-") {
-			continue
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
 		}
-		models = append(models, core.ModelOption{Name: id, Desc: m.DisplayName})
 	}
-	sort.Slice(models, func(i, j int) bool { return models[i].Name > models[j].Name })
-	return models
+	return false
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
@@ -218,9 +302,18 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			model = m
 		}
 	}
+	launch := a.ensureLaunchLocked()
+	launch.mu.Lock()
+	launch.model = model
 	a.mu.Unlock()
+	launch.mu.Unlock()
 
-	return newAntigravitySession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, timeout)
+	session, err := newAntigravitySession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, timeout)
+	if err != nil {
+		return nil, err
+	}
+	session.launch = launch
+	return session, nil
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -280,6 +373,38 @@ func (a *Agent) GetMode() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.mode
+}
+
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	opts := map[string]any{"mode": a.mode}
+	if a.model != "" {
+		opts["model"] = a.model
+	}
+	if a.launch != nil {
+		a.launch.mu.RLock()
+		if a.launch.effort != "" {
+			opts["reasoning_effort"] = a.launch.effort
+		}
+		a.launch.mu.RUnlock()
+	}
+	if a.timeout > 0 {
+		opts["timeout_mins"] = int64(a.timeout / time.Minute)
+	}
+	if a.cmd != "" {
+		opts["cmd"] = append([]string{a.cmd}, a.cliExtraArgs...)
+	}
+	if len(a.configEnv) > 0 {
+		env := make(map[string]string, len(a.configEnv))
+		for _, entry := range a.configEnv {
+			if key, value, ok := strings.Cut(entry, "="); ok {
+				env[key] = value
+			}
+		}
+		opts["env"] = env
+	}
+	return opts
 }
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
@@ -343,12 +468,14 @@ func (a *Agent) SetActiveProvider(name string) bool {
 	defer a.mu.Unlock()
 	if name == "" {
 		a.activeIdx = -1
+		a.syncLaunchLocked()
 		slog.Info("antigravity: provider cleared")
 		return true
 	}
 	for i, p := range a.providers {
 		if p.Name == name {
 			a.activeIdx = i
+			a.syncLaunchLocked()
 			slog.Info("antigravity: provider switched", "provider", name)
 			return true
 		}

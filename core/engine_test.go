@@ -6148,6 +6148,60 @@ func TestCmdDiff_RejectsDashTarget(t *testing.T) {
 	}
 }
 
+type stubUsageBudgetAgent struct {
+	stubUsageAgent
+	budget time.Duration
+}
+
+func (a *stubUsageBudgetAgent) UsageQueryTimeout() time.Duration { return a.budget }
+
+func TestUsageFetchTimeout_DefaultsStayAtTenSeconds(t *testing.T) {
+	if got := usageFetchTimeout(&stubAgent{}); got != 10*time.Second {
+		t.Fatalf("default timeout = %s, want 10s", got)
+	}
+	if got := usageFetchTimeout(&stubUsageBudgetAgent{budget: 5 * time.Second}); got != 10*time.Second {
+		t.Fatalf("short budget = %s, want the 10s default", got)
+	}
+	if got := usageFetchTimeout(&stubUsageBudgetAgent{budget: 20 * time.Second}); got != 20*time.Second {
+		t.Fatalf("cli budget = %s, want 20s", got)
+	}
+}
+
+func TestCmdUsage_QuotaUnsupported(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	agent := &stubUsageAgent{err: fmt.Errorf("wrapped: %w", ErrUsageUnsupported)}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.handleCommand(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, "/usage")
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "剩余额度") {
+		t.Fatalf("sent = %q, want remaining-quota unsupported", p.sent)
+	}
+	if strings.Contains(p.sent[0], "获取 usage 失败") {
+		t.Fatalf("sent = %q, unsupported quota must not look like a fetch failure", p.sent[0])
+	}
+}
+
+func TestFormatUsageReport_RendersEveryQuotaGroup(t *testing.T) {
+	report := &UsageReport{
+		Provider: "antigravity",
+		Buckets: []UsageBucket{
+			{Name: "Gemini Models", Windows: []UsageWindow{
+				{UsedPercent: 4, WindowSeconds: 604800, ResetAfterSeconds: 3600},
+				{UsedPercent: 5, WindowSeconds: 18000, ResetAfterSeconds: 60},
+			}},
+			{Name: "Claude and GPT models", Windows: []UsageWindow{
+				{UsedPercent: 0, WindowSeconds: 604800, ResetAfterSeconds: 3600},
+				{UsedPercent: 0, WindowSeconds: 18000, ResetAfterSeconds: 60},
+			}},
+		},
+	}
+	text := formatUsageReport(report, LangEnglish)
+	for _, want := range []string{"Gemini Models", "Claude and GPT models", "Remaining: 96%", "Remaining: 95%", "Remaining: 100%"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("usage text = %q, missing %q", text, want)
+		}
+	}
+}
+
 func TestCmdUsage_UnsupportedAgent(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

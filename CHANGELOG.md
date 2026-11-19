@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Antigravity**: Feishu `/model`, `/reasoning`, and `/usage` follow the installed `agy` CLI. The model list comes from `agy models`, the next run passes `--model` when `agy --help` advertises it, and reasoning is applied only as a catalog variant or as `--effort`. `/usage` reads `agy -p /usage` remaining quota on agy 1.1.11+ and reports that remaining quota is unsupported otherwise. Consumed token counts are not shown as remaining allowance.
+
 ## v1.5.1-beta.1 (2026-08-28)
 
 Beta since v1.5.0 stable — 16 merged PRs focused on Feishu/Weixin reliability, Claude Code /compact, Codex reasoning, and Cursor image attachments. See `changelogs/v1.5.1-beta.1.md` for the full contributor list.

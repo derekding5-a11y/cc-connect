@@ -47,6 +47,11 @@ type Platform interface {
 // ErrNotSupported indicates a platform doesn't support a particular operation.
 var ErrNotSupported = errors.New("operation not supported by this platform")
 
+// ErrUsageUnsupported means a UsageReporter has no documented remaining-quota
+// query. Callers must not substitute consumed token counts for remaining
+// allowance.
+var ErrUsageUnsupported = errors.New("remaining quota query is not supported")
+
 // ReplyContextReconstructor is an optional interface for platforms that can
 // recreate a reply context from a session key. This is needed for cron jobs
 // to send messages to users without an incoming message.
@@ -474,6 +479,19 @@ type ModelOption struct {
 // model quota usage from their backing provider.
 type UsageReporter interface {
 	GetUsage(ctx context.Context) (*UsageReport, error)
+}
+
+// UsageQueryBudget optionally lengthens the /usage fetch deadline. The default
+// is 10s. Agents whose quota command starts a local CLI may request longer.
+// Values at or below the default are ignored so other agents stay on 10s.
+type UsageQueryBudget interface {
+	UsageQueryTimeout() time.Duration
+}
+
+// ReasoningModelSelection is implemented when a reasoning change is stored as
+// a model id that should be saved through the existing model persistence path.
+type ReasoningModelSelection interface {
+	ReasoningModel() (model string, persist bool)
 }
 
 // UsageReport is a provider-neutral quota snapshot returned by UsageReporter.

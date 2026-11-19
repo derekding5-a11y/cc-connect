@@ -352,15 +352,16 @@ const (
 	MsgCompressNoSession    MsgKey = "compress_no_session"
 	MsgCompressDone         MsgKey = "compress_done"
 
-	MsgMemoryNotSupported MsgKey = "memory_not_supported"
-	MsgMemoryShowProject  MsgKey = "memory_show_project"
-	MsgMemoryShowGlobal   MsgKey = "memory_show_global"
-	MsgMemoryEmpty        MsgKey = "memory_empty"
-	MsgMemoryAdded        MsgKey = "memory_added"
-	MsgMemoryAddFailed    MsgKey = "memory_add_failed"
-	MsgMemoryAddUsage     MsgKey = "memory_add_usage"
-	MsgUsageNotSupported  MsgKey = "usage_not_supported"
-	MsgUsageFetchFailed   MsgKey = "usage_fetch_failed"
+	MsgMemoryNotSupported    MsgKey = "memory_not_supported"
+	MsgMemoryShowProject     MsgKey = "memory_show_project"
+	MsgMemoryShowGlobal      MsgKey = "memory_show_global"
+	MsgMemoryEmpty           MsgKey = "memory_empty"
+	MsgMemoryAdded           MsgKey = "memory_added"
+	MsgMemoryAddFailed       MsgKey = "memory_add_failed"
+	MsgMemoryAddUsage        MsgKey = "memory_add_usage"
+	MsgUsageNotSupported     MsgKey = "usage_not_supported"
+	MsgUsageQuotaUnsupported MsgKey = "usage_quota_unsupported"
+	MsgUsageFetchFailed      MsgKey = "usage_fetch_failed"
 
 	// Inline strings previously hardcoded in engine.go
 	MsgStatusMode             MsgKey = "status_mode"
@@ -2406,6 +2407,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "目前 Agent 不支援 `/usage`。",
 		LangJapanese:           "現在のエージェントは `/usage` をサポートしていません。",
 		LangSpanish:            "El agente actual no admite `/usage`.",
+	},
+	MsgUsageQuotaUnsupported: {
+		LangEnglish:            "Remaining account quota is not available from this CLI. Consumed tokens are not remaining allowance.",
+		LangChinese:            "当前 CLI 无法查询剩余额度。已消耗的 token 不是剩余额度。",
+		LangTraditionalChinese: "目前 CLI 無法查詢剩餘額度。已消耗的 token 不是剩餘額度。",
+		LangJapanese:           "この CLI では残りクォータを照会できません。消費トークンは残り枠ではありません。",
+		LangSpanish:            "Esta CLI no puede consultar la cuota restante. Los tokens consumidos no son la cuota restante.",
 	},
 	MsgUsageFetchFailed: {
 		LangEnglish:            "Failed to fetch usage: %v",

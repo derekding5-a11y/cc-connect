@@ -74,7 +74,7 @@ func TestSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 
 func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
 	s, _ := newAntigravitySession(context.Background(), "echo", []string{"--verbose"}, "/tmp", "", "default", "", nil, 0)
-	args := s.buildAntigravityArgs("sid-1", true, "plan", "/tmp/agy-config", "What is 1+1?")
+	args := s.buildAntigravityArgs("sid-1", true, "plan", "/tmp/agy-config", "What is 1+1?", agyLaunch{})
 	if len(args) < 2 {
 		t.Fatalf("args too short: %v", args)
 	}

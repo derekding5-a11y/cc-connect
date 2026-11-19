@@ -9431,12 +9431,16 @@ func (e *Engine) cmdUsage(p Platform, msg *Message) {
 		return
 	}
 
-	fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+	fetchCtx, cancel := context.WithTimeout(e.ctx, usageFetchTimeout(agent))
 	defer cancel()
 
 	report, err := reporter.GetUsage(fetchCtx)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgUsageFetchFailed, err))
+		if errors.Is(err, ErrUsageUnsupported) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgUsageQuotaUnsupported))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgUsageFetchFailed, sanitizeUsageError(err)))
 		return
 	}
 
@@ -9462,8 +9466,31 @@ func formatUsageReport(report *UsageReport, lang Language) string {
 }
 
 func formatUsageBlocks(report *UsageReport, lang Language) string {
+	if report == nil || len(report.Buckets) == 0 {
+		return ""
+	}
+	if len(report.Buckets) == 1 {
+		return formatOneUsageBucket(report, lang, false)
+	}
+	var sections []string
+	for i := range report.Buckets {
+		one := &UsageReport{Buckets: report.Buckets[i : i+1]}
+		if section := formatOneUsageBucket(one, lang, true); section != "" {
+			sections = append(sections, section)
+		}
+	}
+	if len(sections) == 0 {
+		return ""
+	}
+	return "\n\n" + strings.Join(sections, "\n\n")
+}
+
+func formatOneUsageBucket(report *UsageReport, lang Language, withName bool) string {
 	primary, secondary := selectUsageWindows(report)
 	var sections []string
+	if withName && len(report.Buckets) > 0 && report.Buckets[0].Name != "" && (primary != nil || secondary != nil) {
+		sections = append(sections, report.Buckets[0].Name)
+	}
 	if primary != nil {
 		sections = append(sections, formatUsageBlock(lang, primary))
 	}
@@ -9473,7 +9500,10 @@ func formatUsageBlocks(report *UsageReport, lang Language) string {
 	if len(sections) == 0 {
 		return ""
 	}
-	return "\n\n" + strings.Join(sections, "\n\n")
+	if !withName {
+		return "\n\n" + strings.Join(sections, "\n\n")
+	}
+	return strings.Join(sections, "\n")
 }
 
 func accountDisplay(report *UsageReport) string {
@@ -10675,6 +10705,10 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetReasoningEffort(target)
+	if err := e.persistReasoningModel(agent, agent == e.agent); err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
+		return
+	}
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 
 	s := sessions.GetOrCreateActive(msg.SessionKey)
@@ -10683,6 +10717,42 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
+}
+
+func (e *Engine) persistReasoningModel(agent Agent, persistConfig bool) error {
+	sel, ok := agent.(ReasoningModelSelection)
+	if !ok {
+		return nil
+	}
+	model, persist := sel.ReasoningModel()
+	if !persist || strings.TrimSpace(model) == "" {
+		return nil
+	}
+	_, err := e.switchModelOnAgent(agent, model, persistConfig)
+	return err
+}
+
+func usageFetchTimeout(agent Agent) time.Duration {
+	const defaultTimeout = 10 * time.Second
+	budget, ok := agent.(UsageQueryBudget)
+	if !ok || budget == nil {
+		return defaultTimeout
+	}
+	if d := budget.UsageQueryTimeout(); d > defaultTimeout {
+		return d
+	}
+	return defaultTimeout
+}
+
+func sanitizeUsageError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.Join(strings.Fields(err.Error()), " ")
+	if len(msg) > 300 {
+		msg = msg[:300]
+	}
+	return msg
 }
 
 func (e *Engine) reasoningUsage(efforts []string) string {
@@ -13031,6 +13101,9 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		for _, effort := range efforts {
 			if effort == target {
 				switcher.SetReasoningEffort(target)
+				if err := e.persistReasoningModel(agent, agent == e.agent); err != nil {
+					slog.Error("reasoning model persist failed", "error", err)
+				}
 				e.cleanupInteractiveState(interactiveKey)
 				s := sessions.GetOrCreateActive(sessionKey)
 				s.SetAgentSessionID("", "")
