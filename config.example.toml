@@ -2331,8 +2331,13 @@ app_secret = "your-feishu-app-secret"
 # - "yolo":      Auto-approve all tool calls (--dangerously-skip-permissions) / 自动批准所有工具调用
 # - "plan":      Read-only plan mode with terminal sandbox constraints (--sandbox) / 只读沙箱规划模式
 #
-# Optional: specify a model / 可选：指定模型
-# model = "gemini-3.1-pro-preview"
+# Optional: pin a model slug from `agy models`.
+# When the installed agy advertises --model, cc-connect passes it on every
+# headless run. Leave unset to use the CLI default.
+# 可选：填写 `agy models` 列出的模型 slug。当前 agy 声明了 --model 时，每次无头调用都会带上它。
+# model = "gemini-3.8-flash-medium"
+# reasoning_effort = "high"  # low | medium | high | xhigh | max, only if that model publishes the variant
+#                             # 仅当该模型提供对应变体时生效
 #
 # # Provider with API key / 使用 API Key 的 Provider
 # [[projects.agent.providers]]

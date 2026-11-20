@@ -1,0 +1,13 @@
+{
+  "conversation_id": "055a398f-db14-4c5f-abbb-1bf03f8120a7",
+  "status": "SUCCESS",
+  "response": "About 96% of the weekly quota remains.\n",
+  "num_turns": 1,
+  "usage": {
+    "input_tokens": 10415,
+    "output_tokens": 657,
+    "thinking_tokens": 616,
+    "cache_read_tokens": 8113,
+    "total_tokens": 11072
+  }
+}

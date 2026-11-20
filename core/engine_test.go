@@ -6148,6 +6148,169 @@ func TestCmdDiff_RejectsDashTarget(t *testing.T) {
 	}
 }
 
+type stubUsageBudgetAgent struct {
+	stubUsageAgent
+	budget time.Duration
+}
+
+func (a *stubUsageBudgetAgent) UsageQueryTimeout() time.Duration { return a.budget }
+
+type deadlineCatalogAgent struct {
+	stubModelModeAgent
+	models []ModelOption
+}
+
+func (a *deadlineCatalogAgent) ModelCatalogTimeout() time.Duration { return 20 * time.Second }
+
+func (a *deadlineCatalogAgent) AvailableModels(ctx context.Context) []ModelOption {
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) < 10*time.Second {
+		return nil
+	}
+	return append([]ModelOption(nil), a.models...)
+}
+
+func cardSelects(card *Card) []CardSelect {
+	if card == nil {
+		return nil
+	}
+	var selects []CardSelect
+	for _, el := range card.Elements {
+		if sel, ok := el.(CardSelect); ok {
+			selects = append(selects, sel)
+		}
+	}
+	return selects
+}
+
+func TestCmdModel_FeishuDropdownUsesCatalog(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubModelModeAgent{model: "gpt-4.1"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.handleCommand(p, &Message{SessionKey: "feishu:chat:user", ReplyCtx: "ctx"}, "/model")
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("cards = %d, want 1", len(p.repliedCards))
+	}
+	selects := cardSelects(p.repliedCards[0])
+	if len(selects) != 1 || len(selects[0].Options) != 2 {
+		t.Fatalf("selects = %+v, want one dropdown with the two catalog models", selects)
+	}
+	if selects[0].Options[0].Value != "act:/model switch 1" || !strings.Contains(selects[0].Options[0].Text, "gpt-4.1") {
+		t.Fatalf("first option = %+v", selects[0].Options[0])
+	}
+
+	models := make([]ModelOption, 25)
+	for i := range models {
+		models[i] = ModelOption{Name: fmt.Sprintf("gemini-4-neon-%02d", i+1), Desc: "Gemini"}
+	}
+	slow := &deadlineCatalogAgent{stubModelModeAgent: stubModelModeAgent{model: models[0].Name}, models: models}
+	p2 := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e2 := NewEngine("test", slow, []Platform{p2}, "", LangChinese)
+	e2.handleCommand(p2, &Message{SessionKey: "feishu:chat:user", ReplyCtx: "ctx"}, "/model")
+	if len(p2.repliedCards) != 1 {
+		t.Fatalf("slow cards = %d, want 1", len(p2.repliedCards))
+	}
+	selects = cardSelects(p2.repliedCards[0])
+	if len(selects) != 2 {
+		t.Fatalf("long catalog selects = %d, want 2 dropdowns", len(selects))
+	}
+	if len(selects[0].Options) != feishuSelectOptionCap || len(selects[1].Options) != 5 {
+		t.Fatalf("option counts = %d and %d", len(selects[0].Options), len(selects[1].Options))
+	}
+	found := false
+	for _, sel := range selects {
+		for _, opt := range sel.Options {
+			if strings.Contains(opt.Text, "gemini-4-neon-21") && opt.Value == "act:/model switch 21" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("dropdowns = %+v, missing model 21", selects)
+	}
+
+	result := e2.handleCardNav("act:/model switch 21", "feishu:chat:user")
+	if slow.GetModel() != "gemini-4-neon-21" {
+		t.Fatalf("model after dropdown = %q", slow.GetModel())
+	}
+	if result == nil || !strings.Contains(result.RenderText(), "gemini-4-neon-21") {
+		t.Fatalf("result card = %v", result)
+	}
+}
+
+func TestModelCatalogTimeout_DefaultStaysAtThreeSeconds(t *testing.T) {
+	if got := modelCatalogTimeout(&stubModelModeAgent{}); got != 3*time.Second {
+		t.Fatalf("default catalog timeout = %s, want 3s", got)
+	}
+	if got := modelCatalogTimeout(&deadlineCatalogAgent{}); got != 20*time.Second {
+		t.Fatalf("cli catalog timeout = %s, want 20s", got)
+	}
+}
+
+func TestCmdReasoning_FeishuDropdownListsEfforts(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubModelModeAgent{reasoningEffort: "high", reasoningEfforts: []string{"low", "medium", "high"}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.handleCommand(p, &Message{SessionKey: "feishu:chat:user", ReplyCtx: "ctx"}, "/reasoning")
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("cards = %d, want 1", len(p.repliedCards))
+	}
+	selects := cardSelects(p.repliedCards[0])
+	if len(selects) != 1 || len(selects[0].Options) != 3 {
+		t.Fatalf("reasoning selects = %+v", selects)
+	}
+	if selects[0].Options[2].Text != "high" || selects[0].Options[2].Value != "act:/reasoning 3" {
+		t.Fatalf("high option = %+v", selects[0].Options[2])
+	}
+}
+
+func TestUsageFetchTimeout_DefaultsStayAtTenSeconds(t *testing.T) {
+	if got := usageFetchTimeout(&stubAgent{}); got != 10*time.Second {
+		t.Fatalf("default timeout = %s, want 10s", got)
+	}
+	if got := usageFetchTimeout(&stubUsageBudgetAgent{budget: 5 * time.Second}); got != 10*time.Second {
+		t.Fatalf("short budget = %s, want the 10s default", got)
+	}
+	if got := usageFetchTimeout(&stubUsageBudgetAgent{budget: 20 * time.Second}); got != 20*time.Second {
+		t.Fatalf("cli budget = %s, want 20s", got)
+	}
+}
+
+func TestCmdUsage_QuotaUnsupported(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	agent := &stubUsageAgent{err: fmt.Errorf("wrapped: %w", ErrUsageUnsupported)}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	e.handleCommand(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, "/usage")
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "剩余额度") {
+		t.Fatalf("sent = %q, want remaining-quota unsupported", p.sent)
+	}
+	if strings.Contains(p.sent[0], "获取 usage 失败") {
+		t.Fatalf("sent = %q, unsupported quota must not look like a fetch failure", p.sent[0])
+	}
+}
+
+func TestFormatUsageReport_RendersEveryQuotaGroup(t *testing.T) {
+	report := &UsageReport{
+		Provider: "antigravity",
+		Buckets: []UsageBucket{
+			{Name: "Gemini Models", Windows: []UsageWindow{
+				{UsedPercent: 4, WindowSeconds: 604800, ResetAfterSeconds: 3600},
+				{UsedPercent: 5, WindowSeconds: 18000, ResetAfterSeconds: 60},
+			}},
+			{Name: "Claude and GPT models", Windows: []UsageWindow{
+				{UsedPercent: 0, WindowSeconds: 604800, ResetAfterSeconds: 3600},
+				{UsedPercent: 0, WindowSeconds: 18000, ResetAfterSeconds: 60},
+			}},
+		},
+	}
+	text := formatUsageReport(report, LangEnglish)
+	for _, want := range []string{"Gemini Models", "Claude and GPT models", "Remaining: 96%", "Remaining: 95%", "Remaining: 100%"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("usage text = %q, missing %q", text, want)
+		}
+	}
+}
+
 func TestCmdUsage_UnsupportedAgent(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

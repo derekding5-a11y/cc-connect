@@ -37,6 +37,7 @@ type antigravitySession struct {
 	wg               sync.WaitGroup
 	alive            atomic.Bool
 	permissionBridge *agyPermissionBridge
+	launch           *launchState
 }
 
 func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*antigravitySession, error) {
@@ -55,6 +56,7 @@ func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, 
 		cancel:    cancel,
 	}
 	as.alive.Store(true)
+	as.launch = &launchState{model: strings.TrimSpace(model)}
 
 	if mode == "default" {
 		bridge, err := newAgyPermissionBridge(sessionCtx, as.events)
@@ -149,10 +151,11 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 	if as.permissionBridge != nil {
 		agyConfigDir = as.permissionBridge.AgyConfigDir()
 	}
-	args := as.buildAntigravityArgs(chatID, isResume, as.mode, agyConfigDir, fullPrompt)
-	if strings.TrimSpace(as.model) != "" {
-		slog.Warn("antigravitySession: model is configured but ignored because agy does not support --model yet", "model", as.model)
+	resolved, err := as.resolvedLaunch()
+	if err != nil {
+		return err
 	}
+	args := as.buildAntigravityArgs(chatID, isResume, as.mode, agyConfigDir, fullPrompt, resolved)
 
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -206,7 +209,7 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 	return nil
 }
 
-func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool, mode, agyConfigDir, fullPrompt string) []string {
+func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool, mode, agyConfigDir, fullPrompt string, resolved agyLaunch) []string {
 	// Prepend extra args from cmd so wrappers like "timeout 3600 agy" work.
 	// Keep "-p <prompt>" at the very end because agy consumes the immediate next arg.
 	args := append([]string{}, as.extraArgs...)
@@ -224,8 +227,34 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 	case "plan":
 		args = append(args, "--sandbox")
 	}
+	if resolved.Model != "" {
+		args = append(args, "--model", resolved.Model)
+	}
+	if resolved.Effort != "" {
+		args = append(args, "--effort", resolved.Effort)
+	}
 	args = append(args, "-p", fullPrompt)
 	return args
+}
+
+func (as *antigravitySession) resolvedLaunch() (agyLaunch, error) {
+	model, effort, caps, catalog := as.currentLaunch()
+	return resolveAgyLaunch(model, effort, caps, catalog)
+}
+
+func (as *antigravitySession) currentLaunch() (string, string, cliCapabilities, []core.ModelOption) {
+	if as.launch != nil {
+		return as.launch.snapshot()
+	}
+	return as.model, "", cliCapabilities{}, nil
+}
+
+func (as *antigravitySession) StartupWarning() string {
+	model, _, caps, _ := as.currentLaunch()
+	if strings.TrimSpace(model) != "" && !caps.Model {
+		return "The installed agy does not advertise --model, so the selected model is not passed to the CLI.\n当前 agy 未声明 --model，所选模型不会传给 CLI。"
+	}
+	return ""
 }
 
 func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
