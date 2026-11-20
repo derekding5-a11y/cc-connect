@@ -222,8 +222,53 @@ func TestProbeAgyCLI_VersionAndHelp(t *testing.T) {
 		}
 		return help, "", nil
 	}, "agy")
-	if old.UsagePrint || !old.Model {
+	if old.UsagePrint || !old.Model || !old.ModelsCommand {
 		t.Fatalf("old caps = %+v", old)
+	}
+
+	noSubcommand := probeAgyCLI(context.Background(), func(_ context.Context, _ string, args ...string) (string, string, error) {
+		switch args[0] {
+		case "--version":
+			return "1.5.12", "", nil
+		default:
+			return "", "Usage: agy.exe\n  --model string\n  --effort string\n  --output-format string\n", errors.New("exit status 1")
+		}
+	}, "agy")
+	if !noSubcommand.Model || !noSubcommand.ModelsCommand || !noSubcommand.UsagePrint {
+		t.Fatalf("help-without-models-word caps = %+v", noSubcommand)
+	}
+	if !noSubcommand.canListModels() {
+		t.Fatal("1.5.12 should list models even when --help omits the subcommand")
+	}
+	if (cliCapabilities{}).canListModels() {
+		t.Fatal("unprobed empty caps must not shell out")
+	}
+}
+
+func TestAvailableModels_SlowCLIStillReturnsCatalog(t *testing.T) {
+	agent := &Agent{
+		cmd: "agy",
+		launch: &launchState{caps: cliCapabilities{
+			Model: true, ModelsCommand: true, OutputFormat: true,
+		}},
+		run: func(ctx context.Context, _ string, _ ...string) (string, string, error) {
+			select {
+			case <-ctx.Done():
+				return "", "", ctx.Err()
+			case <-time.After(1200 * time.Millisecond):
+				return readFixture(t, "models.json"), "", nil
+			}
+		},
+	}
+	short, cancelShort := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancelShort()
+	if models := agent.AvailableModels(short); len(models) != 0 {
+		t.Fatalf("short deadline returned %d models", len(models))
+	}
+	long, cancelLong := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancelLong()
+	if models := agent.AvailableModels(long); len(models) != 7 {
+		t.Fatalf("catalog within the card budget = %d, want 7", len(models))
 	}
 }
 

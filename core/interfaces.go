@@ -488,6 +488,13 @@ type UsageQueryBudget interface {
 	UsageQueryTimeout() time.Duration
 }
 
+// ModelCatalogBudget optionally lengthens the /model card catalog fetch.
+// The default is 3s. Agents that shell out to a local CLI may request longer.
+// Values at or below the default are ignored.
+type ModelCatalogBudget interface {
+	ModelCatalogTimeout() time.Duration
+}
+
 // ReasoningModelSelection is implemented when a reasoning change is stored as
 // a model id that should be saved through the existing model persistence path.
 type ReasoningModelSelection interface {

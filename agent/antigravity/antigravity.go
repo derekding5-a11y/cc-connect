@@ -80,7 +80,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	caps := probeAgyCLI(context.Background(), execCLI, cmd)
-	return &Agent{
+	agent := &Agent{
 		workDir:      workDir,
 		model:        strings.TrimSpace(model),
 		mode:         mode,
@@ -94,7 +94,17 @@ func New(opts map[string]any) (core.Agent, error) {
 			effort: normalizeAgyEffort(effort),
 			caps:   caps,
 		},
-	}, nil
+	}
+	go agent.prefetchModelCatalog()
+	return agent, nil
+}
+
+func (a *Agent) prefetchModelCatalog() {
+	ctx, cancel := context.WithTimeout(context.Background(), agyUsageTimeout)
+	defer cancel()
+	if _, err := a.loadModelCatalog(ctx); err != nil {
+		slog.Debug("antigravity: model catalog prefetch failed", "error", err)
+	}
 }
 
 func normalizeMode(raw string) string {
@@ -216,7 +226,7 @@ func (a *Agent) GetReasoningEffort() string {
 func (a *Agent) AvailableReasoningEfforts() []string {
 	model, _, _, catalog := a.launchSnapshot()
 	if len(catalog) == 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), agyUsageTimeout)
 		defer cancel()
 		loaded, err := a.loadModelCatalog(ctx)
 		if err != nil {

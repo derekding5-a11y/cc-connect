@@ -35,6 +35,7 @@ type cliCapabilities struct {
 	OutputFormat  bool
 	ModelsCommand bool
 	UsagePrint    bool
+	Probed        bool
 	Version       string
 }
 
@@ -85,22 +86,39 @@ func probeAgyCLI(ctx context.Context, run cliRunner, cmd string) cliCapabilities
 	if run == nil {
 		run = execCLI
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, agyProbeTimeout)
-	defer cancel()
-
 	var caps cliCapabilities
-	if out, errOut, err := run(probeCtx, cmd, "--version"); err == nil {
+	versionCtx, cancelVersion := context.WithTimeout(ctx, agyProbeTimeout)
+	out, errOut, _ := run(versionCtx, cmd, "--version")
+	cancelVersion()
+	if strings.TrimSpace(out+errOut) != "" {
 		caps.Version = parseAgyVersion(out + "\n" + errOut)
 	}
-	if out, errOut, err := run(probeCtx, cmd, "--help"); err == nil {
+	helpCtx, cancelHelp := context.WithTimeout(ctx, agyProbeTimeout)
+	out, errOut, err := run(helpCtx, cmd, "--help")
+	cancelHelp()
+	if err == nil || strings.TrimSpace(out+errOut) != "" {
 		text := out + "\n" + errOut
 		caps.Model = helpHasFlag(text, "--model")
 		caps.Effort = helpHasFlag(text, "--effort")
 		caps.OutputFormat = helpHasFlag(text, "--output-format")
 		caps.ModelsCommand = helpHasWord(text, "models")
 	}
+	if !caps.ModelsCommand && (caps.Model || versionAtLeast(caps.Version, 1, 0, 5)) {
+		// agy models has existed since 1.0.5. Top-level --help often omits the
+		// subcommand, and some builds print help with a non-zero exit.
+		caps.ModelsCommand = true
+	}
+	caps.Probed = true
 	caps.UsagePrint = caps.OutputFormat && versionAtLeast(caps.Version, 1, 1, 11)
 	return caps
+}
+
+func (c cliCapabilities) canListModels() bool {
+	if c.ModelsCommand || c.Model || versionAtLeast(c.Version, 1, 0, 5) {
+		return true
+	}
+	// A probe that learned nothing still gets one documented `agy models` try.
+	return c.Probed && c.Version == "" && !c.Model
 }
 
 func helpHasFlag(help, flag string) bool {
@@ -417,15 +435,24 @@ func (a *Agent) loadModelCatalog(ctx context.Context) ([]core.ModelOption, error
 	if fresh {
 		return cached, nil
 	}
-	if !caps.ModelsCommand {
+	if !caps.canListModels() {
+		if len(cached) > 0 {
+			return cached, nil
+		}
 		return nil, fmt.Errorf("installed agy does not advertise a models command")
 	}
 	stdout, stderr, err := a.runModelsCommand(ctx, caps)
 	if err != nil {
+		if len(cached) > 0 {
+			return cached, nil
+		}
 		return nil, fmt.Errorf("agy models: %s", sanitizeCLIText(joinCLIError(stderr, err)))
 	}
 	models, parseErr := parseAgyModelCatalog(stdout)
 	if parseErr != nil {
+		if len(cached) > 0 {
+			return cached, nil
+		}
 		return nil, parseErr
 	}
 	a.rememberCatalog(models)

@@ -12990,7 +12990,7 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 	}
 	target = strings.TrimSpace(target)
 	if modelSwitchNeedsLookup(target) {
-		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
+		fetchCtx, cancel := context.WithTimeout(e.ctx, modelCatalogTimeout(agent))
 		models := switcher.AvailableModels(fetchCtx)
 		target = resolveModelSwitchTarget(target, models)
 		cancel()
@@ -13059,7 +13059,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if !ok {
 			return
 		}
-		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
+		fetchCtx, cancel := context.WithTimeout(e.ctx, modelCatalogTimeout(agent))
 		target, ok := parseModelSwitchArgs(strings.Fields(args))
 		if !ok {
 			cancel()
@@ -13858,7 +13858,7 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 		return e.simpleCard(e.i18n.T(MsgCardTitleModel), "indigo", e.i18n.T(MsgModelNotSupported))
 	}
 
-	fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
+	fetchCtx, cancel := context.WithTimeout(e.ctx, modelCatalogTimeout(agent))
 	defer cancel()
 	models := switcher.AvailableModels(fetchCtx)
 	current := switcher.GetModel()
@@ -13873,25 +13873,71 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 	var opts []CardSelectOption
 	initVal := ""
 	for i, m := range models {
-		label := m.Name
-		if m.Alias != "" {
-			label = m.Alias + " - " + m.Name
-		} else if m.Desc != "" {
-			label += " — " + m.Desc
-		}
 		val := fmt.Sprintf("act:/model switch %d", i+1)
-		opts = append(opts, CardSelectOption{Text: label, Value: val})
+		opts = append(opts, CardSelectOption{Text: modelSelectLabel(m), Value: val})
 		if m.Name == current {
 			initVal = val
 		}
 	}
 
 	cb := NewCard().Title(e.i18n.T(MsgCardTitleModel), "indigo").
-		Markdown(sb.String()).
-		Select(e.i18n.T(MsgModelSelectPlaceholder), opts, initVal).
-		Buttons(e.cardBackButton())
+		Markdown(sb.String())
+	appendModelSelects(cb, opts, initVal, e.i18n.T(MsgModelSelectPlaceholder))
+	cb.Buttons(e.cardBackButton())
 	cb.Note(e.i18n.T(MsgModelUsage))
 	return cb.Build()
+}
+
+// feishuSelectOptionCap is the largest select_static option list the classic
+// Feishu card schema demonstrates. Longer catalogs are split across dropdowns
+// so the card still offers a tap target for every model.
+const feishuSelectOptionCap = 20
+
+func modelCatalogTimeout(agent Agent) time.Duration {
+	const defaultTimeout = 3 * time.Second
+	budget, ok := agent.(ModelCatalogBudget)
+	if !ok || budget == nil {
+		return defaultTimeout
+	}
+	if d := budget.ModelCatalogTimeout(); d > defaultTimeout {
+		return d
+	}
+	return defaultTimeout
+}
+
+func modelSelectLabel(m ModelOption) string {
+	label := m.Name
+	if m.Alias != "" {
+		label = m.Alias + " - " + m.Name
+	} else if m.Desc != "" {
+		label += " — " + m.Desc
+	}
+	return truncateRunes(label, 100)
+}
+
+func appendModelSelects(cb *CardBuilder, opts []CardSelectOption, initVal, placeholder string) {
+	if len(opts) == 0 || cb == nil {
+		return
+	}
+	if len(opts) <= feishuSelectOptionCap {
+		cb.Select(placeholder, opts, initVal)
+		return
+	}
+	for start := 0; start < len(opts); start += feishuSelectOptionCap {
+		end := start + feishuSelectOptionCap
+		if end > len(opts) {
+			end = len(opts)
+		}
+		chunk := opts[start:end]
+		init := ""
+		for _, opt := range chunk {
+			if opt.Value == initVal {
+				init = initVal
+				break
+			}
+		}
+		cb.Select(fmt.Sprintf("%s (%d-%d)", placeholder, start+1, end), chunk, init)
+	}
 }
 
 func (e *Engine) renderModelSwitchingCard(target string) *Card {

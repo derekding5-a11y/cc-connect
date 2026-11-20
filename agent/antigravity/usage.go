@@ -17,6 +17,8 @@ const agyUsageTimeout = 20 * time.Second
 
 func (a *Agent) UsageQueryTimeout() time.Duration { return agyUsageTimeout }
 
+func (a *Agent) ModelCatalogTimeout() time.Duration { return agyUsageTimeout }
+
 func (a *Agent) GetUsage(ctx context.Context) (*core.UsageReport, error) {
 	if report, ok := a.cachedUsage(); ok {
 		return report, nil
